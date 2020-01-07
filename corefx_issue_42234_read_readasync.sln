@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29306.81
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "corefx_issue_42234_read_readasync", "corefx_issue_42234_read_readasync\corefx_issue_42234_read_readasync.csproj", "{07381487-A2D4-4493-9BEE-AEC0D436F388}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{07381487-A2D4-4493-9BEE-AEC0D436F388}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{07381487-A2D4-4493-9BEE-AEC0D436F388}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{07381487-A2D4-4493-9BEE-AEC0D436F388}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{07381487-A2D4-4493-9BEE-AEC0D436F388}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {EAFA07A8-4EE3-4F03-A8B5-24E4C852BA35}
+	EndGlobalSection
+EndGlobal
