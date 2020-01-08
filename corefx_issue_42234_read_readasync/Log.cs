@@ -7,10 +7,12 @@ namespace corefx_issue_42234_read_readasync
         private static readonly object SyncRoot = new object();
         public static void WriteLine(String s)
         {
+            
             lock (SyncRoot)
             {
-                Console.WriteLine(s);
+                Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} {s}");
             }
+            
         }
 
         public static string CompressLog(string s)

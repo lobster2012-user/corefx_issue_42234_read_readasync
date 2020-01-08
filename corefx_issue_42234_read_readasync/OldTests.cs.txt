@@ -1,0 +1,418 @@
+using Newtonsoft.Json;
+using NUnit.Framework;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
+using System.Net.Sockets;
+using corefx_issue_42234_read_readasync;
+
+namespace Tests
+{
+    public partial class OldTests
+    {
+        static string CompressLog(string s)
+        {
+            for (var i = 0; i <= 5; ++i)
+            {
+                var search = new string(i.ToString()[0], 5);
+
+                var start = s.IndexOf(search);
+                if (start < 0)
+                    continue;
+                start = s.IndexOf(search, start + 3);
+                if (start < 0)
+                    continue;
+                var end = s.LastIndexOf(search);
+                if (end < 0)
+                    continue;
+                if (start + search.Length >= end + search.Length)
+                    continue;
+
+                s = s.Substring(0, start) + "...." + s.Substring(end);
+            }
+            return s;
+        }
+        static byte[] ToBytes(string s)
+        {
+            return System.Text.Encoding.UTF8.GetBytes(s);
+        }
+        static string ToString(object o)
+        {
+            return JsonConvert.SerializeObject(o);
+        }
+        static object Create(char fill, Int32 count)
+        {
+            return new
+            {
+                Prop = new string(fill, count)
+            };
+        }
+        static string CreateString(char fill, Int32 msgSize)
+        {
+            return ToString(Create(fill, msgSize));
+        }
+
+        static string CreateString(char fill, Int32 msgSize, Int32 count)
+        {
+            string s = "";
+            for (var i = 0; i < count; ++i)
+            {
+                s += ToString(Create((char)(fill + i), msgSize));
+            }
+            return s;
+        }
+        private readonly static object SyncConsole = new object();
+
+        public class LogStream : Stream
+        {
+            private readonly Stream _stream;
+
+            public LogStream(Stream stream)
+            {
+                _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+            }
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => throw new NotImplementedException();
+
+            public override bool CanWrite => throw new NotImplementedException();
+
+            public override long Length => throw new NotImplementedException();
+
+            public override long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+
+            public override void Flush()
+            {
+                throw new NotImplementedException();
+            }
+
+            public override int Read(byte[] buffer, int index, int count)
+            {
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"stream.read-begin {count}");
+                }
+                var read = _stream.Read(buffer, index, count);
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"stream.read-end {read}/{count} '{CompressLog(System.Text.Encoding.UTF8.GetString(buffer, index, read))}'");
+                }
+                return read;
+            }
+
+            public override long Seek(long offset, SeekOrigin origin)
+            {
+                throw new NotImplementedException();
+            }
+
+            public override void SetLength(long value)
+            {
+                throw new NotImplementedException();
+            }
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                throw new NotImplementedException();
+            }
+
+            public override void Close()
+            {
+                _stream.Close();
+            }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    _stream.Dispose();
+                }
+            }
+        }
+        public class LogStreamReader : TextReader
+        {
+            private readonly TextReader _reader;
+
+            public LogStreamReader(TextReader reader)
+            {
+                _reader = reader ?? throw new ArgumentNullException(nameof(reader));
+            }
+
+            public override void Close()
+            {
+                _reader.Close();
+            }
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    _reader.Dispose();
+                }
+            }
+            public override int Read(char[] buffer, int index, int count)
+            {
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"textread.read-begin {count}");
+                }
+                var read = _reader.Read(buffer, index, count);
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"textread.read-end {read}/{count} '{CompressLog(new string(buffer, index, read))}'");
+                }
+                return read;
+            }
+            public override async Task<int> ReadAsync(char[] buffer, int index, int count)
+            {
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"textread.readasync-begin {count}");
+                }
+                var read = await _reader.ReadAsync(buffer, index, count);
+                lock (SyncConsole)
+                {
+                    Console.WriteLine($"textread.readasync-end {read}/{count} '{CompressLog(new string(buffer, index, read))}'");
+                }
+                return read;
+            }
+
+        }
+
+        [TestCase(0, 56565, true)]
+        [TestCase(5000, 56566, true)]
+        [TestCase(0, 56567, false)]
+        [TestCase(5000, 56568, false)]
+        public async Task ReadAsync_JsonTest(Int32 lastMessageDelay, Int32 port, bool useReadFromAsync)
+        {
+            /*
+            var buffers = new List<(Int32 timeout, string data)>();
+
+            var msg1 = CreateString('1', 400, 1);
+            buffers.Add((0, (msg1)));
+
+            var msg2 = CreateString('2', 400, 3);
+            buffers.Add((0, (msg2)));
+
+            var msg3 = CreateString('5', 400, 1);
+            buffers.Add((0, (msg3)));
+
+            var msg4 = CreateString('8', 400, 1);
+            buffers.Add((lastMessageDelay, (msg4)));
+
+            */
+            var buffers = DataGenerator.Generate(lastMessageDelay);
+
+            /*
+            var listener = new TcpListener(System.Net.IPAddress.Loopback, port);
+            listener.Start();
+
+            var _ = listener.AcceptTcpClientAsync().ContinueWith(async task =>
+            {
+                var server = task.Result;
+                using (var stream = server.GetStream())
+                {
+                    foreach (var buf in buffers)
+                    {
+                        await Task.Delay(buf.timeout);
+                        var data = ToBytes(buf.data);
+                        lock (SyncConsole)
+                        {
+                            Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-before {buf.data}");
+                        }
+                        await stream.WriteAsync(data, 0, data.Length);
+                        await stream.FlushAsync();
+                        lock (SyncConsole)
+                        {
+                            Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-after");
+                        }
+                    }
+                    await Task.Delay(-1).ConfigureAwait(false);
+                }
+            }, TaskContinuationOptions.LongRunning);
+            */
+            corefx_issue_42234_read_readasync.Tests.StartTestServer(port, buffers);
+
+            using (var cts = new System.Threading.CancellationTokenSource())
+            {
+                //await Task.Factory.StartNew(async () =>
+                {
+                    using (var socket = new TcpClient())
+                    {
+                        await socket.ConnectAsync("127.0.0.1", port)/*.ConfigureAwait(false)*/;
+                        using (var stream = socket.GetStream())
+                        {
+                            cts.CancelAfter(2000);
+                            cts.Token.Register(() => stream.Close());
+                            using (var textReader = new StreamReader(stream))
+                            {
+                                using (var jsonReader = new JsonTextReader(new LogStreamReader(textReader))
+                                {
+                                    SupportMultipleContent = true,
+                                })
+                                {
+                                    var count = 0;
+                                    while (await jsonReader.ReadAsync(cts.Token)/*.ConfigureAwait(false)*/)
+                                    {
+                                        JToken token;
+                                        if (useReadFromAsync)
+                                        {
+                                            token = await JToken.ReadFromAsync(jsonReader, cts.Token)/*.ConfigureAwait(false)*/;
+                                        }
+                                        else
+                                        {
+                                            token = JToken.ReadFrom(jsonReader);//, cts.Token);
+                                        }
+                                        lock (SyncConsole)
+                                        {
+                                            Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} read json: {token}");
+                                        }
+                                        cts.Token.ThrowIfCancellationRequested();
+                                        ++count;
+                                        if (count == 5)
+                                            break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                //, cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            }
+        }
+
+        [TestCase(0, 46565, true)]
+        [TestCase(5000, 46566, true)]
+        [TestCase(0, 46567, false)]
+        [TestCase(5000, 46568, false)]
+        public async Task ReadAsync_Test(Int32 lastMessageDelay, Int32 port, bool useReadFromAsync)
+        {
+            /*
+            var buffers = new List<(Int32 timeout, string data)>();
+
+            var msg1 = CreateString('1', 400, 1);
+            buffers.Add((0, (msg1)));
+
+            var msg2 = CreateString('2', 400, 3);
+            buffers.Add((0, (msg2)));
+
+            var msg3 = CreateString('5', 400, 1);
+            buffers.Add((0, (msg3)));
+
+            var msg4 = CreateString('8', 400, 1);
+            buffers.Add((lastMessageDelay, (msg4)));
+            */
+            var buffers = DataGenerator.Generate(lastMessageDelay);
+
+            /*
+            var listener = new TcpListener(System.Net.IPAddress.Loopback, port);
+            listener.Start();
+
+            var _ = listener.AcceptTcpClientAsync().ContinueWith(async task =>
+            {
+                var totalWritten = 0;
+                var server = task.Result;
+                using (var stream = server.GetStream())
+                {
+                    foreach (var buf in buffers)
+                    {
+                        await Task.Delay(buf.timeout);
+                        var data = ToBytes(buf.data);
+                        lock (SyncConsole)
+                        {
+                            Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-before {CompressLog(buf.data)}");
+                        }
+                        await stream.WriteAsync(data, 0, data.Length);
+                        await stream.FlushAsync();
+                        totalWritten += data.Length;
+                        lock (SyncConsole)
+                        {
+                            Console.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-after total={totalWritten}");
+                        }
+                    }
+                    await Task.Delay(-1).ConfigureAwait(false);
+                }
+            }, TaskContinuationOptions.LongRunning);
+            */
+
+            corefx_issue_42234_read_readasync.Tests.StartTestServer(port, buffers);
+
+            using (var cts = new System.Threading.CancellationTokenSource())
+            {
+                //await Task.Factory.StartNew(async () =>
+                {
+                    using (var socket = new TcpClient())
+                    {
+                        await socket.ConnectAsync("127.0.0.1", port)/*.ConfigureAwait(false)*/;
+                        using (var stream = socket.GetStream())
+                        {
+                            cts.CancelAfter(2000);
+                            cts.Token.Register(() => stream.Close());
+                            using (var textReader = new StreamReader(new LogStream(stream)))
+                            {
+                                using (var reader = new LogStreamReader(textReader))
+                                {
+                                    var totalRead = 0;
+                                    var read1 = await reader.ReadAsync(new char[1023], 0, 1023);
+                                    totalRead += read1;
+                                    lock (SyncConsole)
+                                    {
+                                        Console.WriteLine($"totalRead: {totalRead}");
+                                    }
+                                    var read2 = await reader.ReadAsync(new char[612], 0, 612);
+                                    totalRead += read2;
+                                    lock (SyncConsole)
+                                    {
+                                        Console.WriteLine($"totalRead: {totalRead}");
+                                    }
+                                    if (useReadFromAsync)
+                                    {
+                                        var read3 = await reader.ReadAsync(new char[1024], 0, 1024);
+                                        totalRead += read3;
+                                        lock (SyncConsole)
+                                        {
+                                            Console.WriteLine($"totalRead: {totalRead};");
+                                        }
+                                        var read4 = await reader.ReadAsync(new char[2048], 0, 2048);
+                                        totalRead += read4;
+                                        lock (SyncConsole)
+                                        {
+                                            Console.WriteLine($"totalRead: {totalRead}");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        var read3 = reader.Read(new char[1024], 0, 1024);
+                                        totalRead += read3;
+                                        lock (SyncConsole)
+                                        {
+                                            Console.WriteLine($"totalRead: {totalRead}");
+                                        }
+                                        var read4 = reader.Read(new char[2048], 0, 2048);
+                                        totalRead += read4;
+                                        lock (SyncConsole)
+                                        {
+                                            Console.WriteLine($"totalRead: {totalRead}");
+                                        }
+                                    }
+
+                                    cts.Token.ThrowIfCancellationRequested();
+                                }
+                            }
+                        }
+                    }
+                }
+                //, cts.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            }
+        }
+
+        [TestCase(1, 2, 3)]
+        public void TestOptionsArgs(Int32 arg1, Int32 arg2, Int32 arg3, Int32 arg4 = 10)
+        {
+            Console.WriteLine(arg1);
+            Console.WriteLine(arg2);
+            Console.WriteLine(arg3);
+            Console.WriteLine(arg4);
+        }
+    }
+}

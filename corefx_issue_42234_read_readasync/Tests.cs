@@ -2,6 +2,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 
@@ -10,7 +11,7 @@ namespace corefx_issue_42234_read_readasync
 
     public class Tests
     {
-        void StartTestServer(Int32 port, IEnumerable<(Int32 timeout, string data)> buffers)
+        public static void StartTestServer(Int32 port, IEnumerable<(Int32 timeout, string data)> buffers)
         {
             var listener = new TcpListener(System.Net.IPAddress.Loopback, port);
             listener.Start();
@@ -19,6 +20,7 @@ namespace corefx_issue_42234_read_readasync
                 var server = task.Result;
                 using (var stream = server.GetStream())
                 {
+                    Int32 total = 0;
                     foreach (var buf in buffers)
                     {
                         await Task.Delay(buf.timeout)/*.ConfigureAwait(false)*/;
@@ -27,7 +29,10 @@ namespace corefx_issue_42234_read_readasync
 
                         await stream.WriteAsync(data, 0, data.Length)/*.ConfigureAwait(false)*/;
                         await stream.FlushAsync()/*.ConfigureAwait(false)*/;
-                        Log.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-after");
+
+                        total += data.Length;
+
+                        Log.WriteLine($"{DateTime.Now.ToString("HH:mm:ss")} written-after  total={total}");
                     }
                     await Task.Delay(-1).ConfigureAwait(false);
                 }
@@ -35,75 +40,131 @@ namespace corefx_issue_42234_read_readasync
         }
         Task<Int32> ReadAsync(TextReader reader, Int32 bufferSize)
         {
-            return reader.ReadAsync(new char[1023], 0, 1023);
+            return reader.ReadAsync(new char[bufferSize], 0, bufferSize);
         }
         Int32 Read(TextReader reader, Int32 bufferSize)
         {
             return reader.Read(new char[bufferSize], 0, bufferSize);
         }
-        async Task ProcessClientStream(Stream stream, bool useReadFromAsync)
+        async Task<Int32> ProcessClientStream(
+            Stream stream
+            , Int32[] asyncSizes
+            , Int32[] syncSizes
+            , bool useReadFromAsync
+            , Int32 maxReadSize)
         {
             using (var cts = new System.Threading.CancellationTokenSource())
             {
                 cts.CancelAfter(2000);
-
-                cts.Token.Register(() => stream.Close());
-                using (var textReader = new StreamReader(new LogStream(stream)))
+                try
                 {
-                    using (var reader = new LogStreamReader(textReader))
+                    cts.Token.Register(() => stream.Close());
+                    using (var textReader = new StreamReader(new LogStream(stream)))
                     {
-                        var totalRead = 0;
-                        totalRead += await ReadAsync(reader, 1023);
-                        Log.WriteLine($"totalRead: {totalRead}");
-
-                        totalRead += await ReadAsync(reader, 612);
-                        Log.WriteLine($"totalRead: {totalRead}");
-
-                        if (useReadFromAsync)
+                        using (var reader = new LogStreamReader(textReader))
                         {
-                            totalRead += await ReadAsync(reader, 1024);
-                            Log.WriteLine($"totalRead: {totalRead}");
+                            var totalRead = 0;
+                            Int32 i = 0;
+                            foreach (var size in asyncSizes)
+                            {
+                                totalRead += await ReadAsync(reader, size);
+                                ++i;
+                                Log.WriteLine($"totalRead-async[{i}]: {totalRead}");
+                                if (totalRead >= maxReadSize)
+                                    return totalRead;
+                            }
 
-                            totalRead += await ReadAsync(reader, 2048);
-                            Log.WriteLine($"totalRead: {totalRead}");
+                            if (useReadFromAsync)
+                            {
+                                foreach (var size in syncSizes)
+                                {
+                                    totalRead += await ReadAsync(reader, size);
+                                    ++i;
+                                    Log.WriteLine($"totalRead-async[{i}]: {totalRead}");
+                                    if (totalRead >= maxReadSize)
+                                        return totalRead;
+                                }
+                            }
+                            else
+                            {
+                                foreach (var size in syncSizes)
+                                {
+                                    totalRead += Read(reader, size);
+                                    ++i;
+                                    Log.WriteLine($"totalRead-sync[{i}]: {totalRead}");
+                                    if (totalRead >= maxReadSize)
+                                        return totalRead;
+                                }
+                            }
 
+                            return totalRead;
                         }
-                        else
-                        {
-                            totalRead += Read(reader, 1024);
-                            Log.WriteLine($"totalRead: {totalRead}");
-
-                            totalRead += Read(reader, 2048);
-                            Log.WriteLine($"totalRead: {totalRead}");
-
-                        }
-
-                        cts.Token.ThrowIfCancellationRequested();
                     }
+                }
+                finally
+                {
+                    cts.Token.ThrowIfCancellationRequested();
                 }
             }
         }
-        async Task StartClientAndProcessStream(Int32 port, bool useReadFromAsync)
+        async Task<Int32> StartClientAndProcessStream(
+              Int32 port
+            , Int32[] asyncSizes
+            , Int32[] syncSizes
+            , bool useReadFromAsync
+            , Int32 maxReadSize)
         {
             using (var socket = new TcpClient())
             {
                 await socket.ConnectAsync("127.0.0.1", port);
                 using (var stream = socket.GetStream())
                 {
-                    await ProcessClientStream(stream, useReadFromAsync);
+                    return await ProcessClientStream(
+                          stream: stream
+                        , asyncSizes: asyncSizes
+                        , syncSizes: syncSizes
+                        , useReadFromAsync: useReadFromAsync
+                        , maxReadSize: maxReadSize);
                 }
             }
         }
 
-        [TestCase(0, 46565, true)]
-        [TestCase(5000, 46566, true)]
-        [TestCase(0, 46567, false)]
-        [TestCase(5000, 46568, false)]
+        [TestCase(0, 42565, true)]
+        [TestCase(5000, 42566, true)]
+        [TestCase(0, 42567, false)]
+        [TestCase(5000, 42568, false)]
         public async Task ReadAsync_Test(Int32 lastMessageDelay, Int32 port, bool useReadFromAsync)
         {
-            var preparedServerData = DataGenerator.Generate(lastMessageDelay);
+            var preparedServerData = DataGenerator.Generate(lastMessageDelay).ToArray();
+            var preparedTotalSize = preparedServerData.Sum(z => z.data.Length);
+
+            var expectedMinimumSize = preparedServerData
+                           .SkipLast(1)
+                           .Sum(z => z.data.Length);
+
+            Log.WriteLine($"PreparedTotalSize = {preparedTotalSize}");
+            Log.WriteLine($"expectedMinimumSize = {expectedMinimumSize}");
+
+            foreach (var size in preparedServerData.Select(z => z.data.Length))
+            {
+                Log.WriteLine($"chunk.size = {size}");
+            }
+
+            var asyncSizes = new[] { 1023, 612 };
+            var syncSizes = new[] { 1024, 2048 };
+
             StartTestServer(port, preparedServerData);
-            await StartClientAndProcessStream(port, useReadFromAsync);
+
+            var totalRead = await StartClientAndProcessStream(
+                  port: port,
+                  asyncSizes: asyncSizes
+                , syncSizes: syncSizes
+                , useReadFromAsync: useReadFromAsync
+                , maxReadSize: expectedMinimumSize);
+
+           
+
+            Assert.LessOrEqual(expectedMinimumSize, totalRead);
         }
     }
 }
